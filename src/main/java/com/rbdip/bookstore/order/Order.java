@@ -49,6 +49,10 @@ public class Order {
         }
     }
 
+    List<OrderItem> items() {
+        return items;
+    }
+
     public Long getId() {
         return id;
     }
