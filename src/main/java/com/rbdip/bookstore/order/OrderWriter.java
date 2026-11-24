@@ -7,19 +7,15 @@ import org.springframework.stereotype.Component;
 class OrderWriter {
 
     private final OrderRepository orders;
-    private final OrderItemRepository items;
+    private final CustomerRepository customers;
 
-    OrderWriter(OrderRepository orders, OrderItemRepository items) {
+    OrderWriter(OrderRepository orders, CustomerRepository customers) {
         this.orders = orders;
-        this.items = items;
+        this.customers = customers;
     }
 
     Order save(CreateOrderRequest request, List<OrderValidator.Line> lines) {
-        Order order = orders.save(new Order(
-                request.customerFullName(), request.customerAddress(), request.customerPhone(), "new"));
-        for (OrderValidator.Line line : lines) {
-            items.save(new OrderItem(order.getId(), line.product().getName(), line.product().getPrice(), line.quantity()));
-        }
-        return order;
+        Long customerId = customers.resolve(request.customerFullName(), request.customerAddress(), request.customerPhone());
+        return orders.save(new Order(customers.getReferenceById(customerId), lines));
     }
 }
