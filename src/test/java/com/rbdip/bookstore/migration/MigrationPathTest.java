@@ -3,7 +3,9 @@ package com.rbdip.bookstore.migration;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -61,6 +63,36 @@ class MigrationPathTest {
     }
 
     @Test
+    void backfillsExistingNamesAndAcceptsBothWritersDuringTheRollout() throws Exception {
+        migrate("2");
+        jdbc.update("INSERT INTO customers(full_name) VALUES (?), (?), (?)", "  Rae  van Lee  ", "Solo ", "   ");
+        migrate("3");
+        // This old writer stays in flight until after the backfill commits.
+        try (Connection legacy = jdbc.getDataSource().getConnection(); Statement sql = legacy.createStatement()) {
+            legacy.setAutoCommit(false);
+            sql.executeUpdate("INSERT INTO customers(full_name) VALUES ('Иванов Иван')");
+            migrate("4");
+            legacy.commit();
+        }
+        assertParts("  Rae  van Lee  ", "  Rae", " van Lee  ");
+        assertParts("Solo ", "Solo ", "");
+        assertParts("   ", "   ", "");
+        assertParts("Иванов Иван", "Иванов", "Иван");
+
+        jdbc.update("INSERT INTO customers(first_name, last_name) VALUES ('New', 'Writer')");
+        assertParts("New Writer", "New", "Writer");
+        jdbc.update("UPDATE customers SET full_name = 'Old Writer Jr' WHERE full_name = 'New Writer'");
+        assertParts("Old Writer Jr", "Old", "Writer Jr");
+        jdbc.update("UPDATE customers SET first_name = 'Renamed' WHERE full_name = 'Old Writer Jr'");
+        assertParts("Renamed Writer Jr", "Renamed", "Writer Jr");
+    }
+
+    private void assertParts(String fullName, String firstName, String lastName) {
+        var result = jdbc.queryForMap("SELECT first_name, last_name FROM customers WHERE full_name = ?", fullName);
+        assertThat(result).containsEntry("first_name", firstName).containsEntry("last_name", lastName);
+    }
+
+    @Test
     void usesTheOriginalColumnLengthsWhenIdentifyingCustomers() {
         migrate("2");
         checkContactLimits();
@@ -78,6 +110,28 @@ class MigrationPathTest {
         assertThatThrownBy(() -> jdbc.queryForObject(sql, Long.class, "X".repeat(256), "Road", null))
                 .rootCause().isInstanceOfSatisfying(SQLException.class,
                         e -> assertThat(e.getSQLState()).isEqualTo("22001"));
+    }
+
+    @Test
+    void appliesLegacyColumnLimitsBeforeSplittingNames() {
+        migrate("4");
+        checkContactLimits();
+    }
+
+    @Test
+    void aBusyExpandCanRetryWithoutLosingLegacyWrites() throws Exception {
+        migrate("2");
+        try (Connection busy = jdbc.getDataSource().getConnection(); Statement sql = busy.createStatement()) {
+            busy.setAutoCommit(false);
+            sql.executeUpdate("INSERT INTO customers(full_name) VALUES ('Active Reader')");
+            assertThatThrownBy(() -> Flyway.configure().dataSource(jdbc.getDataSource()).target("3")
+                    .initSql("SET statement_timeout = '6s'").load().migrate())
+                    .rootCause().isInstanceOfSatisfying(SQLException.class,
+                            e -> assertThat(e.getSQLState()).isEqualTo("55P03"));
+            busy.commit();
+        }
+        migrate("4");
+        assertParts("Active Reader", "Active", "Reader");
     }
 
     private void migrate(String target) {
